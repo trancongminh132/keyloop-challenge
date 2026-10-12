@@ -1,0 +1,176 @@
+openapi: 3.0.3
+info:
+  title: Unified Vehicle Document API
+  version: 1.0.0
+  description: |
+    Searches Sales and Service systems concurrently and persists normalized documents.
+    One successful source (including an empty list) returns 200. Both sources failing
+    returns 502. Responses contain only freshly fetched documents; stored documents
+    are not used as a fallback. VIN input is converted to uppercase before validation.
+servers:
+  - url: http://127.0.0.1:8000
+paths:
+  /api/v1/vehicles/{vin}/documents:
+    get:
+      operationId: listVehicleDocuments
+      summary: Get a consolidated document list by VIN
+      parameters:
+        - name: vin
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-HJ-NPR-Za-hj-npr-z0-9]{17}$'
+          example: 1HGCM82633A004352
+      responses:
+        '200':
+          description: Both sources succeeded, or available results from one successful source.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentList'
+              examples:
+                success:
+                  value:
+                    request_id: 4cc9dfe0-b69d-4d12-8c88-c6c9fd1f0a3d
+                    vin: 1HGCM82633A004352
+                    documents:
+                      - id: SALE-1
+                        source: sales
+                        type: sales_contract
+                        title: Sales Contract
+                        issued_at: '2026-09-10T10:15:00.000000Z'
+                        document_url: https://example.test/sales.pdf
+                    sources:
+                      sales: {status: ok, duration_ms: 125}
+                      service: {status: ok, duration_ms: 140}
+                    warnings: []
+                partialFailure:
+                  value:
+                    request_id: 4cc9dfe0-b69d-4d12-8c88-c6c9fd1f0a3d
+                    vin: 1HGCM82633A004352
+                    documents:
+                      - id: SVC-1
+                        source: service
+                        type: service_invoice
+                        title: Service Invoice
+                        issued_at: '2026-10-01T08:30:00.000000Z'
+                        document_url: https://example.test/service.pdf
+                    sources:
+                      sales: {status: timeout, duration_ms: 2000}
+                      service: {status: ok, duration_ms: 140}
+                    warnings: ['Sales System API timed out; returned available documents only.']
+        '422':
+          description: Invalid VIN; no upstream calls are made.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    required: [errors]
+                    properties:
+                      errors:
+                        type: object
+                        required: [vin]
+                        properties:
+                          vin:
+                            type: array
+                            items: {type: string}
+              example:
+                request_id: 4cc9dfe0-b69d-4d12-8c88-c6c9fd1f0a3d
+                message: The VIN must contain 17 letters and digits, excluding I, O and Q.
+                errors:
+                  vin: ['The vin field format is invalid.']
+        '502':
+          description: Both upstream sources failed; documents is empty.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DocumentList'
+                  - $ref: '#/components/schemas/Error'
+              example:
+                request_id: 4cc9dfe0-b69d-4d12-8c88-c6c9fd1f0a3d
+                message: All document sources failed.
+                vin: 1HGCM82633A004352
+                documents: []
+                sources:
+                  sales: {status: timeout, duration_ms: 2000}
+                  service: {status: error, duration_ms: 140}
+                warnings:
+                  - 'Sales System API timed out; returned available documents only.'
+                  - 'Service System API failed; returned available documents only.'
+        '500':
+          description: Unexpected internal failure. Details are logged with the request ID.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                request_id: 4cc9dfe0-b69d-4d12-8c88-c6c9fd1f0a3d
+                message: Unable to retrieve vehicle documents.
+components:
+  headers:
+    RequestId:
+      description: Server-generated UUID matching request_id in the response body and operational records.
+      schema: {type: string, format: uuid}
+  schemas:
+    Error:
+      type: object
+      required: [request_id, message]
+      properties:
+        request_id: {type: string, format: uuid}
+        message: {type: string}
+    DocumentList:
+      type: object
+      required: [request_id, vin, documents, sources, warnings]
+      properties:
+        request_id: {type: string, format: uuid}
+        vin: {type: string, pattern: '^[A-HJ-NPR-Z0-9]{17}$'}
+        documents:
+          type: array
+          description: Newest first; identity is the pair of source and id, with duplicates removed.
+          items:
+            $ref: '#/components/schemas/Document'
+        sources:
+          type: object
+          required: [sales, service]
+          properties:
+            sales:
+              $ref: '#/components/schemas/SourceStatus'
+            service:
+              $ref: '#/components/schemas/SourceStatus'
+        warnings:
+          type: array
+          items: {type: string}
+    SourceStatus:
+      type: object
+      required: [status, duration_ms]
+      properties:
+        status:
+          type: string
+          enum: [ok, timeout, unavailable, error, invalid_response]
+        duration_ms: {type: integer, minimum: 0}
+    Document:
+      type: object
+      required: [id, source, type, title, issued_at, document_url]
+      properties:
+        id: {type: string}
+        source: {type: string, enum: [sales, service]}
+        type: {type: string, nullable: true}
+        title: {type: string}
+        issued_at: {type: string, format: date-time, nullable: true}
+        document_url: {type: string, nullable: true}
